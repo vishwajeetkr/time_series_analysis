@@ -9,6 +9,8 @@
 
 [Forecasting the Behavior of Multivariate Time Series using Neural Networks Networks](https://surface.syr.edu/cgi/viewcontent.cgi?article=1092&context=eecs_techreports)
 
+[STAT 510 | Applied Time Series Analysis](https://online.stat.psu.edu/stat510/)
+
 ## Time Series with Deep Learning
 
 [A Literature Survey of Early Time Series Classification and Deep Learning](http://ceur-ws.org/Vol-1793/paper4.pdf)
