@@ -1,0 +1,826 @@
+---
+title: "MScProject"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Including library for dynamic factor model - MARSS, and for PCA and low-rank reduction - h2o.
+```{r mainlib }
+library(MARSS)
+library(h2o)  # for fitting GLRMs
+```
+
+Other data manupulation libraries.
+```{r otherlib }
+library("dplyr")                            
+library (plyr)
+```
+
+I have worked on multivariate time series data. Original data had daily observations for the concentration of various pollutants. I have considered average weekly data to bring down the noise.
+
+```{r dataimport }
+df = read.csv("C:\\Users\\vishw\\Contents\\Semester 10\\M Sc Project\\city_weekly.csv", header=T)
+print(head(df))
+```
+
+```{r }
+df$Date <- as.Date(df$Date, format = "%Y-%m-%d")
+dim(df)
+rownames(df) <- df$Date
+df = subset(df, select = -c(Date) )
+```
+
+Initial plot of data.
+
+```{r initplot}
+plot.ts(df)
+```
+
+Decomposing all individual time series of all pollutants except AQI series. 
+
+```{r seriesDecompose}
+dfDecom.PM2.5 <- decompose(ts(df[, 1], frequency = 52))
+dfDecom.NO <- decompose(ts(df[, 2], frequency = 52))
+dfDecom.NO2 <- decompose(ts(df[, 3], frequency = 52))
+dfDecom.NOx <- decompose(ts(df[, 4], frequency = 52))
+dfDecom.NH3 <- decompose(ts(df[, 5], frequency = 52))
+dfDecom.CO <- decompose(ts(df[, 6], frequency = 52))
+dfDecom.Benzene <- decompose(ts(df[, 7], frequency = 52))
+dfDecom.Toluene <- decompose(ts(df[, 8], frequency = 52))
+```
+
+```{r seriesDecomposePlot}
+print(dfDecom.PM2.5)
+plot(dfDecom.PM2.5)
+plot(dfDecom.NO)
+plot(dfDecom.NO2)
+plot(dfDecom.NOx)
+plot(dfDecom.NH3)
+plot(dfDecom.CO)
+plot(dfDecom.Benzene)
+plot(dfDecom.Toluene)
+
+```
+
+Grouping up of trend, seasonal and random components of decomposed time series.
+
+```{r groupDecompose}
+dfDecom.trend <- data.frame(PM2.5.t = dfDecom.PM2.5$trend,
+                            NO.t = dfDecom.NO$trend,
+                            NO2.t = dfDecom.NO2$trend,
+                            NOx.t = dfDecom.NOx$trend,
+                            NH3.t = dfDecom.NH3$trend,
+                            CO.t = dfDecom.CO$trend,
+                            Benzene.t = dfDecom.Benzene$trend,
+                            Toluene.t = dfDecom.Toluene$trend
+                            
+)
+
+plot.ts(dfDecom.trend, main="Grouping of trend data")
+
+dfDecom.seasonal <- data.frame(PM2.5.s = dfDecom.PM2.5$seasonal,
+                               NO.s = dfDecom.NO$seasonal,
+                               NO2.s = dfDecom.NO2$seasonal,
+                               NOx.s = dfDecom.NOx$seasonal,
+                               NH3.s = dfDecom.NH3$seasonal,
+                               CO.s = dfDecom.CO$seasonal,
+                               Benzene.s = dfDecom.Benzene$seasonal,
+                               Toluene.s = dfDecom.Toluene$seasonal
+                               
+)
+
+plot.ts(dfDecom.seasonal, main="Grouping of seasonal data")
+
+dfDecom.random <- data.frame(PM2.5.r = dfDecom.PM2.5$random,
+                             NO.r = dfDecom.NO$random,
+                             NO2.r = dfDecom.NO2$random,
+                             NOx.r = dfDecom.NOx$random,
+                             NH3.r = dfDecom.NH3$random,
+                             CO.r = dfDecom.CO$random,
+                             Benzene.r = dfDecom.Benzene$random,
+                             Toluene.r = dfDecom.Toluene$random
+                             
+)
+
+plot.ts(dfDecom.random, main="Grouping of random data")
+
+```
+
+Decomposition of time series produces NaNs. So we need to remove rows of data corresponding to NaNs.
+
+```{r removeNaNs}
+st <- 27
+en <- 262
+num <- en - st + 1
+ratio <- 0.7
+mid <- as.numeric(num*ratio)
+df <- df[st:en, ]
+df_aqi <- df[, c("AQI")]
+df = subset(df, select = -c(AQI) )
+df_aqi_train <- df_aqi[1:mid]
+df_aqi_test <- df_aqi[(mid+1):num]
+df_train <- df[1:mid, ]
+df_test <- df[(mid+1):num, ]
+dfDecom.trend <- dfDecom.trend[st:en, ]
+dfDecom.seasonal <- dfDecom.seasonal[st:en, ]
+dfDecom.random <- dfDecom.random[st:en, ]
+print(head(df_aqi_train))
+print(head(df_aqi_test))
+
+y <- df_aqi_train
+y0 <- df_aqi_test
+```
+
+### Original LM
+
+This is regression model on base data.
+```{r}
+lm.1 = lm(df_aqi_train ~ df_train[, 1] + df_train[, 2] + df_train[, 3] + df_train[, 4] + df_train[, 5] + 
+            df_train[, 6] + df_train[, 7] + df_train[, 8])
+yhat.1 = predict(lm.1, data.frame(df_train[, 1:8]))
+
+train.err.1 = mean((y-yhat.1)^2)
+y0hat.1 = predict(lm.1, data.frame(df_test[, 1:8]))
+test.err.1 = mean((y0-y0hat.1)^2)
+print(summary(lm.1))
+```
+
+### end Original LM
+
+### PCA on random part
+
+```{r }
+h2o.no_progress()  # turn off progress bars
+h2o.init(max_mem_size = "5g")  # connect to H2O instance
+
+dfDecom.random.h2o <- as.h2o(dfDecom.random)
+```
+
+```{r }
+# run basic pca on random component
+pca_random <- h2o.prcomp(
+  training_frame = dfDecom.random.h2o,
+  pca_method = "GramSVD",
+  k = ncol(dfDecom.random.h2o), 
+  transform = "STANDARDIZE", 
+  impute_missing = TRUE,
+  max_runtime_secs = 1000
+)
+```
+
+```{r }
+print(summary(pca_random))
+```
+
+```{r }
+print(pca_random@model$importance)
+pca_random_pred <- h2o.predict(pca_random, dfDecom.random.h2o)
+
+```
+
+### end PCA on random part
+
+### PCA on original data
+
+```{r }
+print(head(df))
+dfDecom.df.h2o <- as.h2o(df)
+```
+
+```{r }
+pca_orig <- h2o.prcomp(
+  training_frame = dfDecom.df.h2o,
+  pca_method = "GramSVD",
+  k = ncol(dfDecom.random.h2o), 
+  transform = "STANDARDIZE", 
+  impute_missing = TRUE,
+  max_runtime_secs = 1000
+)
+```
+
+```{r }
+print(summary(pca_orig))
+```
+
+```{r }
+print(pca_orig@model$importance)
+pca_orig_pred <- h2o.predict(pca_orig, dfDecom.df.h2o)
+
+```
+
+### end PCA on original data
+
+### GLRM on original data
+
+#### dimension = 6
+
+```{r }
+dfDecom.df.h2o <- as.h2o(df)
+```
+
+```{r }
+glrm_orig6 <- h2o.glrm(
+  training_frame = dfDecom.df.h2o,
+  k = 6, 
+  loss = "Quadratic",
+  regularization_x = "None", 
+  regularization_y = "None", 
+  transform = "STANDARDIZE", 
+  max_iterations = 2000,
+  seed = 123
+)
+```
+
+```{r }
+print(summary(glrm_orig6))
+```
+
+```{r }
+print(glrm_orig6@model$importance)
+glrm_orig6_pred <- h2o.predict(glrm_orig6, dfDecom.df.h2o)
+
+```
+
+#### dimension = 5
+
+```{r }
+dfDecom.df.h2o <- as.h2o(df)
+```
+
+```{r }
+glrm_orig5 <- h2o.glrm(
+  training_frame = dfDecom.df.h2o,
+  k = 5, 
+  loss = "Quadratic",
+  regularization_x = "None", 
+  regularization_y = "None", 
+  transform = "STANDARDIZE", 
+  max_iterations = 2000,
+  seed = 123
+)
+```
+
+```{r }
+print(summary(glrm_orig5))
+```
+
+```{r }
+print(glrm_orig5@model$importance)
+glrm_orig5_pred <- h2o.predict(glrm_orig5, dfDecom.df.h2o)
+
+```
+
+
+### end GLRM on original data
+
+### GLRM on trend data
+
+#### dimension = 3
+
+```{r }
+dfDecom.trend.h2o <- as.h2o(dfDecom.trend)
+```
+
+```{r }
+glrm_trend3 <- h2o.glrm(
+  training_frame = dfDecom.trend.h2o,
+  k = 3, 
+  loss = "Quadratic",
+  regularization_x = "None", 
+  regularization_y = "None", 
+  transform = "STANDARDIZE", 
+  max_iterations = 2000,
+  seed = 123
+)
+```
+
+```{r }
+print(summary(glrm_trend3))
+```
+
+```{r }
+print(glrm_trend3@model$importance)
+glrm_trend3_pred <- h2o.predict(glrm_trend3, dfDecom.trend.h2o)
+
+```
+
+#### dimension = 2
+
+
+```{r }
+glrm_trend2 <- h2o.glrm(
+  training_frame = dfDecom.trend.h2o,
+  k = 2, 
+  loss = "Quadratic",
+  regularization_x = "None", 
+  regularization_y = "None", 
+  transform = "STANDARDIZE", 
+  max_iterations = 2000,
+  seed = 123
+)
+```
+
+```{r }
+print(summary(glrm_trend2))
+```
+
+```{r }
+print(glrm_trend2@model$importance)
+glrm_trend2_pred <- h2o.predict(glrm_trend2, dfDecom.trend.h2o)
+
+```
+
+#### dimension = 1
+
+
+```{r }
+glrm_trend1 <- h2o.glrm(
+  training_frame = dfDecom.trend.h2o,
+  k = 1, 
+  loss = "Quadratic",
+  regularization_x = "None", 
+  regularization_y = "None", 
+  transform = "STANDARDIZE", 
+  max_iterations = 2000,
+  seed = 123
+)
+```
+
+```{r }
+print(summary(glrm_trend1))
+```
+
+```{r }
+print(glrm_trend1@model$importance)
+glrm_trend1_pred <- h2o.predict(glrm_trend1, dfDecom.trend.h2o)
+
+```
+
+### end GLRM on trend data
+
+### DFA on original data
+
+#### dimension = 6
+```{r }
+
+dfDecom.df.t <- t(df[, 1:8])
+```
+
+Standardizing seasonal data.
+
+```{r }
+dfDecom.df.t.mean <- apply(dfDecom.df.t, 1, mean, na.rm = TRUE)
+dfDecom.df.t.std <- dfDecom.df.t - dfDecom.df.t.mean
+```
+
+```{r }
+# create loading matrix
+Z_vals <- list("z11", 0, 0, 0, 0, 0, "z21", "z22", 0, 0, 0, 0, "z31", "z32", "z33", 0, 0, 0, "z41", "z42", "z43", "z44", 0, 0,
+               "z51", "z52", "z53", "z54", "z55", 0, "61", "z62", "z63", "64", "z65", "z66", "z71", "z72", "z73", "z74", "z75", "z76", "z81",  "z82", "z83", "z84",  "z85", "z86")
+ZZ <- matrix(Z_vals, nrow = 8, ncol = 6, byrow = TRUE)
+## 'aa' is the offset/scaling
+aa <- "zero"
+## 'DD' and 'd' are for covariates
+DD <- "zero"  # matrix(0,mm,1)
+dd <- "zero"  # matrix(0,1,wk_last)
+## 'RR' is var-cov matrix for obs errors
+RR <- "diagonal and unequal"
+
+
+## number of processes
+mm <- 6
+## 'BB' is identity: 1's along the diagonal & 0's elsewhere
+BB <- "identity"  # diag(mm)
+## 'uu' is a column vector of 0's
+uu <- "zero"  # matrix(0, mm, 1)
+## 'CC' and 'cc' are for covariates
+CC <- "zero"  # matrix(0, mm, 1)
+cc <- "zero"  # matrix(0, 1, wk_last)
+## 'QQ' is identity
+QQ <- "identity"  # diag(mm)
+
+
+## list with specifications for model vectors/matrices
+mod_list <- list(Z = ZZ, A = aa, D = DD, d = dd, R = RR, B = BB, 
+                 U = uu, C = CC, c = cc, Q = QQ)
+## list with model inits
+init_list <- list(x0 = matrix(rep(0, mm), mm, 1))
+## list with model control parameters
+con_list <- list(maxit = 3000, allow.degen = TRUE)
+```
+
+Fitting the model.
+
+```{r }
+## fit MARSS
+dfa_orig6 <- MARSS(y = dfDecom.df.t.std, model = mod_list, inits = init_list, 
+               control = con_list)
+```
+
+```{r origd_dfa_data}
+dfa_pred_orig6 <- t(dfa_orig6$states)
+print(head(dfa_pred_orig6))
+```
+
+#### dimension = 5
+
+```{r }
+# create loading matrix
+Z_vals <- list("z11", 0, 0, 0, 0, "z21", "z22", 0, 0, 0, "z31", "z32", "z33", 0, 0, "z41", "z42", "z43", "z44", 0,
+               "z51", "z52", "z53", "z54", "z55", "61", "z62", "z63", "64", "z65", "z71", "z72", "z73", "z74", "z75", "z81",  "z82", "z83", "z84",  "z85")
+ZZ <- matrix(Z_vals, nrow = 8, ncol = 5, byrow = TRUE)
+## 'aa' is the offset/scaling
+aa <- "zero"
+## 'DD' and 'd' are for covariates
+DD <- "zero"  # matrix(0,mm,1)
+dd <- "zero"  # matrix(0,1,wk_last)
+## 'RR' is var-cov matrix for obs errors
+RR <- "diagonal and unequal"
+
+
+## number of processes
+mm <- 5
+## 'BB' is identity: 1's along the diagonal & 0's elsewhere
+BB <- "identity"  # diag(mm)
+## 'uu' is a column vector of 0's
+uu <- "zero"  # matrix(0, mm, 1)
+## 'CC' and 'cc' are for covariates
+CC <- "zero"  # matrix(0, mm, 1)
+cc <- "zero"  # matrix(0, 1, wk_last)
+## 'QQ' is identity
+QQ <- "identity"  # diag(mm)
+
+
+## list with specifications for model vectors/matrices
+mod_list <- list(Z = ZZ, A = aa, D = DD, d = dd, R = RR, B = BB, 
+                 U = uu, C = CC, c = cc, Q = QQ)
+## list with model inits
+init_list <- list(x0 = matrix(rep(0, mm), mm, 1))
+## list with model control parameters
+con_list <- list(maxit = 3000, allow.degen = TRUE)
+```
+
+Fitting the model.
+
+```{r }
+## fit MARSS
+dfa_orig5 <- MARSS(y = dfDecom.df.t.std, model = mod_list, inits = init_list, 
+               control = con_list)
+```
+
+```{r }
+dfa_pred_orig5 <- t(dfa_orig5$states)
+print(head(dfa_pred_orig5))
+```
+
+### end DFA on original data
+
+### DFA on seasonal data
+
+```{r }
+
+dfDecom.seasonal.t <- t(dfDecom.seasonal[, 1:8])
+```
+
+Standardizing seasonal data.
+
+```{r }
+dfDecom.seasonal.t.mean <- apply(dfDecom.seasonal.t, 1, mean, na.rm = TRUE)
+dfDecom.seasonal.t.std <- dfDecom.seasonal.t - dfDecom.seasonal.t.mean
+```
+
+#### dimension = 3
+
+```{r }
+# create loading matrix
+Z_vals <- list("z11", 0, 0, "z21", "z22", 0, "z31", "z32", "z33", "z41", "z42", "z43",
+               "z51", "z52", "z53", "61", "z62", "z63", "z71", "z72", "z73", "z81",  "z82", "z83")
+ZZ <- matrix(Z_vals, nrow = 8, ncol = 3, byrow = TRUE)
+## 'aa' is the offset/scaling
+aa <- "zero"
+## 'DD' and 'd' are for covariates
+DD <- "zero"  # matrix(0,mm,1)
+dd <- "zero"  # matrix(0,1,wk_last)
+## 'RR' is var-cov matrix for obs errors
+RR <- "diagonal and unequal"
+
+
+## number of processes
+mm <- 3
+## 'BB' is identity: 1's along the diagonal & 0's elsewhere
+BB <- "identity"  # diag(mm)
+## 'uu' is a column vector of 0's
+uu <- "zero"  # matrix(0, mm, 1)
+## 'CC' and 'cc' are for covariates
+CC <- "zero"  # matrix(0, mm, 1)
+cc <- "zero"  # matrix(0, 1, wk_last)
+## 'QQ' is identity
+QQ <- "identity"  # diag(mm)
+
+
+## list with specifications for model vectors/matrices
+mod_list <- list(Z = ZZ, A = aa, D = DD, d = dd, R = RR, B = BB, 
+                 U = uu, C = CC, c = cc, Q = QQ)
+## list with model inits
+init_list <- list(x0 = matrix(rep(0, mm), mm, 1))
+## list with model control parameters
+con_list <- list(maxit = 3000, allow.degen = TRUE)
+```
+
+Fitting the model.
+
+```{r }
+## fit MARSS
+dfa_seasonal3 <- MARSS(y = dfDecom.seasonal.t.std, model = mod_list, inits = init_list, 
+               control = con_list)
+```
+
+```{r }
+dfa_pred_seasonal3 <- t(dfa_seasonal3$states)
+print(head(dfa_pred_seasonal3))
+```
+
+
+#### dimension = 2
+
+```{r }
+# create loading matrix
+Z_vals <- list("z11", 0, "z21", "z22", "z31", "z32", "z41", "z42", 
+               "z51", "z52", "61", "z62", "z71", "z72", "z81",  "z82")
+ZZ <- matrix(Z_vals, nrow = 8, ncol = 2, byrow = TRUE)
+## 'aa' is the offset/scaling
+aa <- "zero"
+## 'DD' and 'd' are for covariates
+DD <- "zero"  # matrix(0,mm,1)
+dd <- "zero"  # matrix(0,1,wk_last)
+## 'RR' is var-cov matrix for obs errors
+RR <- "diagonal and unequal"
+
+
+## number of processes
+mm <- 2
+## 'BB' is identity: 1's along the diagonal & 0's elsewhere
+BB <- "identity"  # diag(mm)
+## 'uu' is a column vector of 0's
+uu <- "zero"  # matrix(0, mm, 1)
+## 'CC' and 'cc' are for covariates
+CC <- "zero"  # matrix(0, mm, 1)
+cc <- "zero"  # matrix(0, 1, wk_last)
+## 'QQ' is identity
+QQ <- "identity"  # diag(mm)
+
+
+## list with specifications for model vectors/matrices
+mod_list <- list(Z = ZZ, A = aa, D = DD, d = dd, R = RR, B = BB, 
+                 U = uu, C = CC, c = cc, Q = QQ)
+## list with model inits
+init_list <- list(x0 = matrix(rep(0, mm), mm, 1))
+## list with model control parameters
+con_list <- list(maxit = 3000, allow.degen = TRUE)
+```
+
+Fitting the model.
+
+```{r }
+## fit MARSS
+dfa_seasonal2 <- MARSS(y = dfDecom.seasonal.t.std, model = mod_list, inits = init_list, 
+               control = con_list)
+```
+
+```{r }
+dfa_pred_seasonal2 <- t(dfa_seasonal2$states)
+print(head(dfa_pred_seasonal2))
+```
+
+
+### end DFA on seasonal data
+
+### Experiments on dimension = 6
+
+#### Building lm on PCA of original data.
+
+```{r }
+df_pred_pca <- as.data.frame(pca_orig_pred[, 1:6])
+df_pred_pca_train <- as.data.frame(df_pred_pca[1:mid, ])
+df_pred_pca_test <- as.data.frame(df_pred_pca[(mid+1):en, ])
+```
+
+```{r }
+
+lm.2 = lm(df_aqi_train ~ df_pred_pca_train[, 1] + df_pred_pca_train[, 2] + df_pred_pca_train[, 3] + df_pred_pca_train[, 4] + df_pred_pca_train[, 5] + df_pred_pca_train[, 6])
+
+yhat.2 = predict(lm.2, data.frame(df_pred_pca_train))
+train.err.2.m = mean((y-yhat.2)^2)
+y0hat.2 = predict(lm.2, data.frame(df_pred_pca_test))
+test.err.2.m = mean((y0-y0hat.2)^2)
+
+train.err.2.m / train.err.1
+test.err.2.m/ test.err.1
+```
+
+#### Building lm on DFA of original data.
+
+```{r }
+
+df_pred_dfa <- as.data.frame(dfa_pred_orig6[, 1:6])
+df_pred_dfa_train <- as.data.frame(df_pred_dfa[1:mid, ])
+df_pred_dfa_test <- as.data.frame(df_pred_dfa[(mid+1):en, ])
+```
+
+```{r }
+
+lm.3 = lm(df_aqi_train ~ df_pred_dfa_train[, 1] + df_pred_dfa_train[, 2] + df_pred_dfa_train[, 3] + df_pred_dfa_train[, 4] + df_pred_dfa_train[, 5] + df_pred_dfa_train[, 6])
+
+yhat.3 = predict(lm.3, data.frame(df_pred_dfa_train))
+train.err.3.m = mean((y-yhat.3)^2)
+y0hat.3 = predict(lm.3, data.frame(df_pred_dfa_test))
+test.err.3.m = mean((y0-y0hat.3)^2)
+
+train.err.3.m / train.err.1
+test.err.3.m/ test.err.1
+```
+
+#### Building lm on GLRM of original data.
+
+```{r }
+
+df_pred_glrm <- as.data.frame(glrm_orig6_pred[, 1:6])
+df_pred_glrm_train <- as.data.frame(df_pred_glrm[1:mid, ])
+df_pred_glrm_test <- as.data.frame(df_pred_glrm[(mid+1):en, ])
+```
+
+```{r }
+
+lm.4 = lm(df_aqi_train ~ df_pred_glrm_train[, 1] + df_pred_glrm_train[, 2] + df_pred_glrm_train[, 3] + df_pred_glrm_train[, 4] + df_pred_glrm_train[, 5] + df_pred_glrm_train[, 6])
+
+yhat.4 = predict(lm.4, data.frame(df_pred_glrm_train))
+train.err.4.m = mean((y-yhat.4)^2)
+y0hat.4 = predict(lm.4, data.frame(df_pred_glrm_test))
+test.err.4.m = mean((y0-y0hat.4)^2)
+
+train.err.4.m / train.err.1
+test.err.4.m/ test.err.1
+```
+
+#### Building mixed model tdim = 1, sdim = 3, rdim = 2
+
+```{r }
+
+df_pred_t1_s3_r2 <- bind_cols(as.data.frame(glrm_trend1_pred[, 1:1]), as.data.frame(pca_random_pred[, 1:2]), as.data.frame(dfa_pred_seasonal3))
+df_pred_t1_s3_r2_train <- as.data.frame(df_pred_t1_s3_r2[1:mid, ])
+df_pred_t1_s3_r2_test <- as.data.frame(df_pred_t1_s3_r2[(mid+1):en, ])
+
+lm.5 = lm(df_aqi_train ~ df_pred_t1_s3_r2_train[, 1] + df_pred_t1_s3_r2_train[, 2] + df_pred_t1_s3_r2_train[, 3] + df_pred_t1_s3_r2_train[, 4] + df_pred_t1_s3_r2_train[, 5] + df_pred_t1_s3_r2_train[, 6])
+
+yhat.5 = predict(lm.5, data.frame(df_pred_t1_s3_r2_train))
+train.err.5.m = mean((y-yhat.5)^2)
+y0hat.5 = predict(lm.5, data.frame(df_pred_t1_s3_r2_test))
+
+test.err.5.m = mean((y0-y0hat.5)^2)
+
+train.err.5.m / train.err.1
+test.err.5.m/ test.err.1
+```
+
+
+#### Building mixed model tdim = 2, sdim = 2, rdim = 2
+
+```{r }
+
+df_pred_t2_s2_r2 <- bind_cols(as.data.frame(glrm_trend2_pred[, 1:2]), as.data.frame(pca_random_pred[, 1:2]), as.data.frame(dfa_pred_seasonal2))
+df_pred_t2_s2_r2_train <- as.data.frame(df_pred_t2_s2_r2[1:mid, ])
+df_pred_t2_s2_r2_test <- as.data.frame(df_pred_t2_s2_r2[(mid+1):en, ])
+
+lm.6 = lm(df_aqi_train ~ df_pred_t2_s2_r2_train[, 1] + df_pred_t2_s2_r2_train[, 2] + df_pred_t2_s2_r2_train[, 3] + df_pred_t2_s2_r2_train[, 4] + df_pred_t2_s2_r2_train[, 5] + df_pred_t2_s2_r2_train[, 6])
+
+yhat.6 = predict(lm.6, data.frame(df_pred_t1_s3_r2_train))
+train.err.6.m = mean((y-yhat.6)^2)
+y0hat.6 = predict(lm.6, data.frame(df_pred_t2_s2_r2_test))
+
+test.err.6.m = mean((y0-y0hat.6)^2)
+
+train.err.6.m / train.err.1
+test.err.6.m/ test.err.1
+```
+
+
+### end Experiments on dimension = 6
+
+### Experiments on dimension = 5
+
+#### Building lm on PCA of original data.
+
+```{r }
+df_pred_pca <- as.data.frame(pca_orig_pred[, 1:5])
+df_pred_pca_train <- as.data.frame(df_pred_pca[1:mid, ])
+df_pred_pca_test <- as.data.frame(df_pred_pca[(mid+1):en, ])
+```
+
+```{r }
+
+lm.11 = lm(df_aqi_train ~ df_pred_pca_train[, 1] + df_pred_pca_train[, 2] + df_pred_pca_train[, 3] + df_pred_pca_train[, 4] + df_pred_pca_train[, 5])
+
+yhat.11 = predict(lm.11, data.frame(df_pred_pca_train))
+train.err.11.m = mean((y-yhat.11)^2)
+y0hat.11 = predict(lm.11, data.frame(df_pred_pca_test))
+test.err.11.m = mean((y0-y0hat.11)^2)
+
+train.err.11.m / train.err.1
+test.err.11.m/ test.err.1
+```
+
+#### Building lm on DFA of original data.
+
+```{r }
+
+df_pred_dfa <- as.data.frame(dfa_pred_orig5[, 1:5])
+df_pred_dfa_train <- as.data.frame(df_pred_dfa[1:mid, ])
+df_pred_dfa_test <- as.data.frame(df_pred_dfa[(mid+1):en, ])
+```
+
+```{r }
+
+lm.12 = lm(df_aqi_train ~ df_pred_dfa_train[, 1] + df_pred_dfa_train[, 2] + df_pred_dfa_train[, 3] + df_pred_dfa_train[, 4] + df_pred_dfa_train[, 5])
+
+yhat.12 = predict(lm.12, data.frame(df_pred_dfa_train))
+train.err.12.m = mean((y-yhat.12)^2)
+y0hat.12 = predict(lm.12, data.frame(df_pred_dfa_test))
+test.err.12.m = mean((y0-y0hat.12)^2)
+
+train.err.12.m / train.err.1
+test.err.12.m/ test.err.1
+```
+
+#### Building lm on GLRM of original data.
+
+```{r }
+
+df_pred_glrm <- as.data.frame(glrm_orig5_pred[, 1:5])
+df_pred_glrm_train <- as.data.frame(df_pred_glrm[1:mid, ])
+df_pred_glrm_test <- as.data.frame(df_pred_glrm[(mid+1):en, ])
+```
+
+```{r }
+
+lm.13 = lm(df_aqi_train ~ df_pred_glrm_train[, 1] + df_pred_glrm_train[, 2] + df_pred_glrm_train[, 3] + df_pred_glrm_train[, 4] + df_pred_glrm_train[, 5])
+
+yhat.13 = predict(lm.13, data.frame(df_pred_glrm_train))
+train.err.13.m = mean((y-yhat.13)^2)
+y0hat.13 = predict(lm.13, data.frame(df_pred_glrm_test))
+test.err.13.m = mean((y0-y0hat.13)^2)
+
+train.err.13.m / train.err.1
+test.err.13.m/ test.err.1
+```
+
+
+#### Building mixed model tdim = 1, sdim = 3, rdim = 1
+
+```{r }
+
+df_pred_t1_s3_r1 <- bind_cols(as.data.frame(glrm_trend1_pred[, 1:1]), as.data.frame(pca_random_pred[, 1:1]), as.data.frame(dfa_pred_seasonal3))
+df_pred_t1_s3_r1_train <- as.data.frame(df_pred_t1_s3_r1[1:mid, ])
+df_pred_t1_s3_r1_test <- as.data.frame(df_pred_t1_s3_r1[(mid+1):en, ])
+
+lm.14 = lm(df_aqi_train ~ df_pred_t1_s3_r1_train[, 1] + df_pred_t1_s3_r1_train[, 2] + df_pred_t1_s3_r1_train[, 3] + df_pred_t1_s3_r1_train[, 4] + df_pred_t1_s3_r1_train[, 5])
+
+yhat.14 = predict(lm.14, data.frame(df_pred_t1_s3_r1_train))
+train.err.14.m = mean((y-yhat.14)^2)
+y0hat.14 = predict(lm.14, data.frame(df_pred_t1_s3_r1_test))
+
+test.err.14.m = mean((y0-y0hat.14)^2)
+
+train.err.14.m / train.err.1
+test.err.14.m/ test.err.1
+```
+
+
+#### Building mixed model tdim = 1, sdim = 2, rdim = 2
+
+```{r }
+
+df_pred_t1_s2_r2 <- bind_cols(as.data.frame(glrm_trend1_pred[, 1:1]), as.data.frame(pca_random_pred[, 1:2]), as.data.frame(dfa_pred_seasonal2))
+df_pred_t1_s2_r2_train <- as.data.frame(df_pred_t1_s2_r2[1:mid, ])
+df_pred_t1_s2_r2_test <- as.data.frame(df_pred_t1_s2_r2[(mid+1):en, ])
+
+lm.15 = lm(df_aqi_train ~ df_pred_t1_s2_r2_train[, 1] + df_pred_t1_s2_r2_train[, 2] + df_pred_t1_s2_r2_train[, 3] + df_pred_t1_s2_r2_train[, 4] + df_pred_t1_s2_r2_train[, 5])
+
+yhat.15 = predict(lm.15, data.frame(df_pred_t1_s3_r2_train))
+train.err.15.m = mean((y-yhat.15)^2)
+y0hat.15 = predict(lm.15, data.frame(df_pred_t1_s2_r2_test))
+
+test.err.15.m = mean((y0-y0hat.15)^2)
+
+train.err.15.m / train.err.1
+test.err.15.m/ test.err.1
+```
+
+
+
+### end Experiments on dimension = 5
